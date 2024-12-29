@@ -36,7 +36,7 @@ func Init(logFilePath_input string, maxLogsize int) error {
 	logger = log.New(logFile, "", 0)
 
 	go logWorker()
-	go monitorLogSize(logFilePath, maxLogsize)
+	go monitorLogSize(logFilePath, int64(maxLogsize)*1024*1024)
 	return nil
 }
 
@@ -45,8 +45,7 @@ func logWorker() {
 	for {
 		select {
 		case msg := <-logChannel:
-			timestamp := time.Now().Format("02/Jan/2006:15:04:05 -0700")
-			logger.Println(timestamp + " - " + msg)
+			logger.Println(time.Now().Format("02/Jan/2006:15:04:05 -0700") + " - " + msg)
 		case <-quitChannel:
 			return
 		}
@@ -60,29 +59,31 @@ func Log(customMessage string) {
 
 // Logw 用于格式化日志记录
 func Logw(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
-	Log(message)
+	Log(fmt.Sprintf(format, args...))
 }
 
 // 日志等级INFO
 func LogInfo(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
+	/*message := fmt.Sprintf(format, args...)
 	output := fmt.Sprintf("[INFO] %s", message)
-	Log(output)
+	Log(output) */
+	Logw("[INFO] %s", fmt.Sprintf(format, args...))
 }
 
 // 日志等级WARNING
 func LogWarning(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
+	/*message := fmt.Sprintf(format, args...)
 	output := fmt.Sprintf("[WARNING] %s", message)
-	Log(output)
+	Log(output) */
+	Logw("[WARNING] %s", fmt.Sprintf(format, args...))
 }
 
 // 日志等级ERROR
 func LogError(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
+	/*message := fmt.Sprintf(format, args...)
 	output := fmt.Sprintf("[ERROR] %s", message)
-	Log(output)
+	Log(output) */
+	Logw("[ERROR] %s", fmt.Sprintf(format, args...))
 }
 
 // Close 关闭日志文件
@@ -98,8 +99,8 @@ func Close() {
 	}
 }
 
-func monitorLogSize(logFilePath string, maxLogsize int) {
-	var maxLogsizeBytes int64 = int64(maxLogsize) * 1024 * 1024 // 最大日志文件大小，单位为MB
+func monitorLogSize(logFilePath string, maxLogsizeBytes int64) {
+
 	for {
 		time.Sleep(120 * time.Minute) // 每120分钟检查一次
 		logFileMutex.Lock()
@@ -120,7 +121,7 @@ func rotateLogFile(logFilePath string) error {
 
 	if logFile != nil {
 		if err := logFile.Close(); err != nil {
-			logw("Error closing log file for rotation: %v", err)
+			return fmt.Errorf("failed to close log file: %s, error: %w", logFilePath, err)
 		}
 	}
 
@@ -131,7 +132,8 @@ func rotateLogFile(logFilePath string) error {
 	}
 	defer logFile.Close()
 
-	newLogFilePath := logFilePath + "-" + time.Now().Format("20060102-150405") + ".tar.gz"
+	//newLogFilePath := logFilePath + "-" + time.Now().Format("20060102-150405") + ".tar.gz"
+	newLogFilePath := fmt.Sprintf("%s-%s.tar.gz", logFilePath, time.Now().Format("20060102-150405"))
 	outFile, err := os.Create(newLogFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create gz file: %s, error: %w", newLogFilePath, err)
