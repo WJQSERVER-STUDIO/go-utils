@@ -1,3 +1,7 @@
+/*
+Copyright 2024 WJQserver Studio. Open source WSL 1.2 License.
+*/
+
 package logger
 
 import (
@@ -18,6 +22,7 @@ const (
 )
 
 var (
+	Logw         = Logf
 	logw         = Logf
 	logf         = Logf
 	logFile      *os.File
