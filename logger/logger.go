@@ -21,17 +21,54 @@ const (
 	defaultBufSize = 1000
 )
 
+// 日志等级常量
+const (
+	LevelDump = iota
+	LevelDebug
+	LevelInfo
+	LevelWarn
+	LevelError
+	LevelNone
+)
+
 var (
 	Logw         = Logf
 	logw         = Logf
 	logf         = Logf
 	logFile      *os.File
 	logger       *log.Logger
-	logChannel   = make(chan string, defaultBufSize)
+	logChannel   = make(chan logMessage, defaultBufSize)
 	quitChannel  = make(chan struct{})
 	logFileMutex sync.Mutex
 	wg           sync.WaitGroup
+	logLevel     = LevelDump // 默认日志等级为 Dump
 )
+
+// 日志消息结构体
+type logMessage struct {
+	level int
+	msg   string
+}
+
+// SetLogLevel 设置日志等级
+func SetLogLevel(level string) {
+	switch level {
+	case "dump":
+		logLevel = LevelDump
+	case "debug":
+		logLevel = LevelDebug
+	case "info":
+		logLevel = LevelInfo
+	case "warn":
+		logLevel = LevelWarn
+	case "error":
+		logLevel = LevelError
+	case "none":
+		logLevel = LevelNone
+	default:
+		logLevel = LevelDump // 默认等级为 Dump
+	}
+}
 
 // Init 初始化日志记录器
 func Init(logFilePath string, maxLogSizeMB int) error {
@@ -56,18 +93,23 @@ func logWorker() {
 
 	for {
 		select {
-		case msg := <-logChannel:
-			logFileMutex.Lock()
-			logger.Printf("%s - %s\n", time.Now().Format(timeFormat), msg)
-			logFileMutex.Unlock()
+		case logMsg := <-logChannel:
+			// 过滤日志等级
+			if logMsg.level >= logLevel {
+				logFileMutex.Lock()
+				logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
+				logFileMutex.Unlock()
+			}
 		case <-quitChannel:
 			// 处理剩余日志
 			for {
 				select {
-				case msg := <-logChannel:
-					logFileMutex.Lock()
-					logger.Printf("%s - %s\n", time.Now().Format(timeFormat), msg)
-					logFileMutex.Unlock()
+				case logMsg := <-logChannel:
+					if logMsg.level >= logLevel {
+						logFileMutex.Lock()
+						logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
+						logFileMutex.Unlock()
+					}
 				default:
 					return
 				}
@@ -77,9 +119,9 @@ func logWorker() {
 }
 
 // Log 记录日志
-func Log(msg string) {
+func Log(level int, msg string) {
 	select {
-	case logChannel <- msg:
+	case logChannel <- logMessage{level: level, msg: msg}:
 	default:
 		// 日志队列满时丢弃日志并通知
 		fmt.Fprintf(os.Stderr, "Log queue full, dropping message: %s\n", msg)
@@ -87,23 +129,33 @@ func Log(msg string) {
 }
 
 // Logf 格式化日志
-func Logf(format string, args ...interface{}) {
-	Log(fmt.Sprintf(format, args...))
+func Logf(level int, format string, args ...interface{}) {
+	Log(level, fmt.Sprintf(format, args...))
+}
+
+// LogDump Dump级别日志
+func LogDump(format string, args ...interface{}) {
+	Logf(LevelDump, "[DUMP] "+format, args...)
+}
+
+// LogDebug Debug级别日志
+func LogDebug(format string, args ...interface{}) {
+	Logf(LevelDebug, "[DEBUG] "+format, args...)
 }
 
 // LogInfo 信息级别日志
 func LogInfo(format string, args ...interface{}) {
-	Logf("[INFO] "+format, args...)
+	Logf(LevelInfo, "[INFO] "+format, args...)
 }
 
 // LogWarning 警告级别日志
 func LogWarning(format string, args ...interface{}) {
-	Logf("[WARNING] "+format, args...)
+	Logf(LevelWarn, "[WARNING] "+format, args...)
 }
 
 // LogError 错误级别日志
 func LogError(format string, args ...interface{}) {
-	Logf("[ERROR] "+format, args...)
+	Logf(LevelError, "[ERROR] "+format, args...)
 }
 
 // Close 关闭日志系统
