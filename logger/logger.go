@@ -238,6 +238,10 @@ func rotateLogFile(logFilePath string) error {
 		if err := compressLog(backupPath); err != nil {
 			LogError("Compression failed: %v", err)
 		}
+		err = os.Remove(backupPath)
+		if err != nil {
+			LogError("Error removing backup file: %v", err)
+		}
 	}()
 
 	return nil
