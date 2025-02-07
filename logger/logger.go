@@ -12,81 +12,110 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+// 常量定义
 const (
-	timeFormat     = "02/Jan/2006:15:04:05 -0700"
-	defaultBufSize = 1000
+	timeFormat     = "02/Jan/2006:15:04:05 -0700" // 日志时间格式
+	defaultBufSize = 1000                         // 日志通道的默认缓冲区大小
 )
 
 // 日志等级常量
 const (
-	LevelDump = iota
-	LevelDebug
-	LevelInfo
-	LevelWarn
-	LevelError
-	LevelNone
+	LevelDump  = iota // Dump 级别，最低级别日志
+	LevelDebug        // Debug 级别
+	LevelInfo         // Info 级别
+	LevelWarn         // Warn 级别
+	LevelError        // Error 级别
+	LevelNone         // None 级别，不记录日志
 )
 
+// 全局变量
 var (
-	Logw         = Logf
-	logw         = Logf
-	logf         = Logf
-	logFile      *os.File
-	logger       *log.Logger
-	logChannel   = make(chan logMessage, defaultBufSize)
-	quitChannel  = make(chan struct{})
-	logFileMutex sync.Mutex
-	wg           sync.WaitGroup
-	logLevel     = LevelDump // 默认日志等级为 Dump
+	Logw         = Logf                                                        // 快捷方式
+	logw         = Logf                                                        // 快捷方式
+	logf         = Logf                                                        // 快捷方式
+	logger       *log.Logger                                                   // 标准库日志记录器
+	logFile      *os.File                                                      // 当前日志文件句柄
+	logChannel   = make(chan *logMessage, defaultBufSize)                      // 日志消息通道
+	quitChannel  = make(chan struct{})                                         // 用于通知日志系统关闭的通道
+	logFileMutex sync.Mutex                                                    // 日志文件操作的互斥锁
+	wg           sync.WaitGroup                                                // 用于等待日志协程退出
+	logLevel     atomic.Value                                                  // 当前日志等级（使用 atomic.Value 替代 int32）
+	initOnce     sync.Once                                                     // 确保 Init 方法只执行一次
+	droppedLogs  int64                                                         // 被丢弃的日志数量
+	messagePool  = sync.Pool{New: func() interface{} { return &logMessage{} }} // 日志消息池
 )
 
 // 日志消息结构体
 type logMessage struct {
-	level int
-	msg   string
+	level int    // 日志等级
+	msg   string // 日志内容
+}
+
+var logLevelMap = map[string]int{
+	"dump":  LevelDump,
+	"debug": LevelDebug,
+	"info":  LevelInfo,
+	"warn":  LevelWarn,
+	"error": LevelError,
+	"none":  LevelNone,
 }
 
 // SetLogLevel 设置日志等级
-func SetLogLevel(level string) {
-	switch level {
-	case "dump":
-		logLevel = LevelDump
-	case "debug":
-		logLevel = LevelDebug
-	case "info":
-		logLevel = LevelInfo
-	case "warn":
-		logLevel = LevelWarn
-	case "error":
-		logLevel = LevelError
-	case "none":
-		logLevel = LevelNone
-	default:
-		logLevel = LevelDump // 默认等级为 Dump
+func SetLogLevel(level string) error {
+	level = strings.ToLower(level)
+
+	if lvl, ok := logLevelMap[level]; ok {
+		logLevel.Store(lvl)
+		return nil
 	}
+
+	return fmt.Errorf("invalid log level: %s", level)
 }
 
 // Init 初始化日志记录器
 func Init(logFilePath string, maxLogSizeMB int) error {
-	logFileMutex.Lock()
-	defer logFileMutex.Unlock()
+	var initErr error
+	initOnce.Do(func() {
+		if err := validateLogFilePath(logFilePath); err != nil {
+			initErr = fmt.Errorf("invalid log file path: %w", err)
+			return
+		}
 
-	var err error
-	logFile, err = os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
+		logFileMutex.Lock()
+		defer logFileMutex.Unlock()
+
+		var err error
+		logFile, err = os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			initErr = fmt.Errorf("failed to open log file: %w", err)
+			return
+		}
+
+		logger = log.New(logFile, "", 0)
+		logLevel.Store(LevelDump) // 默认日志等级
+
+		go logWorker()
+		go monitorLogSize(logFilePath, int64(maxLogSizeMB)*1024*1024)
+	})
+	return initErr
+}
+
+// validateLogFilePath 验证日志文件路径是否有效
+func validateLogFilePath(path string) error {
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("directory does not exist: %s", dir)
 	}
-
-	logger = log.New(logFile, "", 0)
-	go logWorker()
-	go monitorLogSize(logFilePath, int64(maxLogSizeMB)*1024*1024)
 	return nil
 }
 
+// logWorker 日志处理协程
 func logWorker() {
 	wg.Add(1)
 	defer wg.Done()
@@ -94,22 +123,18 @@ func logWorker() {
 	for {
 		select {
 		case logMsg := <-logChannel:
-			// 过滤日志等级
-			if logMsg.level >= logLevel {
-				logFileMutex.Lock()
-				logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
-				logFileMutex.Unlock()
-			}
+			logFileMutex.Lock()
+			logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
+			logFileMutex.Unlock()
+			messagePool.Put(logMsg) // 回收日志消息对象
 		case <-quitChannel:
-			// 处理剩余日志
 			for {
 				select {
 				case logMsg := <-logChannel:
-					if logMsg.level >= logLevel {
-						logFileMutex.Lock()
-						logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
-						logFileMutex.Unlock()
-					}
+					logFileMutex.Lock()
+					logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
+					logFileMutex.Unlock()
+					messagePool.Put(logMsg)
 				default:
 					return
 				}
@@ -120,11 +145,20 @@ func logWorker() {
 
 // Log 记录日志
 func Log(level int, msg string) {
+	if level < logLevel.Load().(int) {
+		return
+	}
+
+	logMsg := messagePool.Get().(*logMessage)
+	logMsg.level = level
+	logMsg.msg = msg
+
 	select {
-	case logChannel <- logMessage{level: level, msg: msg}:
+	case logChannel <- logMsg:
 	default:
-		// 日志队列满时丢弃日志并通知
+		atomic.AddInt64(&droppedLogs, 1)
 		fmt.Fprintf(os.Stderr, "Log queue full, dropping message: %s\n", msg)
+		messagePool.Put(logMsg) // 回收未使用的日志消息
 	}
 }
 
@@ -133,30 +167,12 @@ func Logf(level int, format string, args ...interface{}) {
 	Log(level, fmt.Sprintf(format, args...))
 }
 
-// LogDump Dump级别日志
-func LogDump(format string, args ...interface{}) {
-	Logf(LevelDump, "[DUMP] "+format, args...)
-}
-
-// LogDebug Debug级别日志
-func LogDebug(format string, args ...interface{}) {
-	Logf(LevelDebug, "[DEBUG] "+format, args...)
-}
-
-// LogInfo 信息级别日志
-func LogInfo(format string, args ...interface{}) {
-	Logf(LevelInfo, "[INFO] "+format, args...)
-}
-
-// LogWarning 警告级别日志
-func LogWarning(format string, args ...interface{}) {
-	Logf(LevelWarn, "[WARNING] "+format, args...)
-}
-
-// LogError 错误级别日志
-func LogError(format string, args ...interface{}) {
-	Logf(LevelError, "[ERROR] "+format, args...)
-}
+// 快捷日志方法
+func LogDump(format string, args ...interface{})    { Logf(LevelDump, "[DUMP] "+format, args...) }
+func LogDebug(format string, args ...interface{})   { Logf(LevelDebug, "[DEBUG] "+format, args...) }
+func LogInfo(format string, args ...interface{})    { Logf(LevelInfo, "[INFO] "+format, args...) }
+func LogWarning(format string, args ...interface{}) { Logf(LevelWarn, "[WARNING] "+format, args...) }
+func LogError(format string, args ...interface{})   { Logf(LevelError, "[ERROR] "+format, args...) }
 
 // Close 关闭日志系统
 func Close() {
@@ -172,6 +188,7 @@ func Close() {
 	}
 }
 
+// monitorLogSize 定期检查日志文件大小
 func monitorLogSize(logFilePath string, maxBytes int64) {
 	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
@@ -194,24 +211,22 @@ func monitorLogSize(logFilePath string, maxBytes int64) {
 	}
 }
 
+// rotateLogFile 轮转日志文件
 func rotateLogFile(logFilePath string) error {
 	logFileMutex.Lock()
 	defer logFileMutex.Unlock()
 
-	// 关闭当前日志文件
 	if logFile != nil {
 		if err := logFile.Close(); err != nil {
 			return fmt.Errorf("error closing log file: %w", err)
 		}
 	}
 
-	// 重命名原日志文件
 	backupPath := fmt.Sprintf("%s.%s", logFilePath, time.Now().Format("20060102-150405"))
 	if err := os.Rename(logFilePath, backupPath); err != nil {
 		return fmt.Errorf("error renaming log file: %w", err)
 	}
 
-	// 创建新日志文件
 	newFile, err := os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
 		return fmt.Errorf("error creating new log file: %w", err)
@@ -219,17 +234,16 @@ func rotateLogFile(logFilePath string) error {
 	logFile = newFile
 	logger.SetOutput(logFile)
 
-	// 异步压缩旧日志
 	go func() {
 		if err := compressLog(backupPath); err != nil {
 			LogError("Compression failed: %v", err)
 		}
-		os.Remove(backupPath)
 	}()
 
 	return nil
 }
 
+// compressLog 压缩日志文件
 func compressLog(srcPath string) error {
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
