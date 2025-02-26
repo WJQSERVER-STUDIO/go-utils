@@ -20,8 +20,9 @@ import (
 
 // 常量定义
 const (
-	timeFormat     = "02/Jan/2006:15:04:05 -0700" // 日志时间格式
-	defaultBufSize = 1000                         // 日志通道的默认缓冲区大小
+	//timeFormat     = "02/Jan/2006:15:04:05 -0700" // 日志时间格式
+	timeFormat     = time.RFC3339 // 日志时间格式
+	defaultBufSize = 1000         // 日志通道的默认缓冲区大小
 )
 
 // 日志等级常量
