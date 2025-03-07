@@ -7,9 +7,10 @@ package logger
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog" // 导入 slog
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,19 +21,18 @@ import (
 
 // 常量定义
 const (
-	//timeFormat     = "02/Jan/2006:15:04:05 -0700" // 日志时间格式
-	timeFormat     = time.RFC3339 // 日志时间格式
+	timeFormat     = time.RFC3339 // 日志时间格式 (slog 默认处理时间，这里可以保留作为参考)
 	defaultBufSize = 1000         // 日志通道的默认缓冲区大小
 )
 
-// 日志等级常量
+// 日志等级常量 (slog 已经有内置的等级，这里可以考虑对齐或者保持现有定义)
 const (
-	LevelDump  = iota // Dump 级别，最低级别日志
-	LevelDebug        // Debug 级别
-	LevelInfo         // Info 级别
-	LevelWarn         // Warn 级别
-	LevelError        // Error 级别
-	LevelNone         // None 级别，不记录日志
+	LevelDump  = iota - 4 // Dump 级别，最低级别日志，对应 slog.LevelDebug -4
+	LevelDebug            // Debug 级别，对应 slog.LevelDebug
+	LevelInfo             // Info 级别，对应 slog.LevelInfo
+	LevelWarn             // Warn 级别，对应 slog.LevelWarn
+	LevelError            // Error 级别，对应 slog.LevelError
+	LevelNone             // None 级别，不记录日志，高于 Error
 )
 
 // 全局变量
@@ -40,7 +40,7 @@ var (
 	Logw         = Logf                                                        // 快捷方式
 	logw         = Logf                                                        // 快捷方式
 	logf         = Logf                                                        // 快捷方式
-	logger       *log.Logger                                                   // 标准库日志记录器
+	logger       *slog.Logger                                                  // 使用 slog.Logger
 	logFile      *os.File                                                      // 当前日志文件句柄
 	logChannel   = make(chan *logMessage, defaultBufSize)                      // 日志消息通道
 	quitChannel  = make(chan struct{})                                         // 用于通知日志系统关闭的通道
@@ -58,14 +58,14 @@ type logMessage struct {
 	msg   string // 日志内容
 }
 
-// 日志等级映射表
+// 日志等级映射表 (需要调整以匹配 slog 的 Level 类型)
 var logLevelMap = map[string]int{
-	"dump":  LevelDump,
-	"debug": LevelDebug,
-	"info":  LevelInfo,
-	"warn":  LevelWarn,
-	"error": LevelError,
-	"none":  LevelNone,
+	"dump":  LevelDump,  // 对应 slog.LevelDebug -4
+	"debug": LevelDebug, // 对应 slog.LevelDebug
+	"info":  LevelInfo,  // 对应 slog.LevelInfo
+	"warn":  LevelWarn,  // 对应 slog.LevelWarn
+	"error": LevelError, // 对应 slog.LevelError
+	"none":  LevelNone,  // 高于 slog.LevelError，用于关闭日志
 }
 
 // SetLogLevel 设置日志等级
@@ -103,8 +103,19 @@ func Init(logFilePath string, maxLogSizeMB int) error {
 			return
 		}
 
-		logger = log.New(logFile, "", 0) // 创建新的日志记录器
-		logLevel.Store(LevelDump)        // 默认日志等级为 Dump
+		// 创建 slog.Logger，使用 TextHandler 输出到文件
+		textHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{
+			Level: slog.LevelDebug, // 默认最低等级设置为 Debug，后续会根据 SetLogLevel 调整
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { // 可以自定义属性处理，例如移除时间戳
+				if a.Key == slog.TimeKey {
+					return slog.Attr{} // 移除时间戳 (如果不需要)
+				}
+				return a
+			},
+		})
+		logger = slog.New(textHandler) // 创建新的 slog.Logger
+
+		logLevel.Store(LevelDump) // 默认日志等级为 Dump
 
 		go logWorker()                                                // 启动日志处理协程
 		go monitorLogSize(logFilePath, int64(maxLogSizeMB)*1024*1024) // 启动日志文件大小监控
@@ -132,17 +143,56 @@ func logWorker() {
 	for {
 		select {
 		case logMsg := <-logChannel: // 从日志通道接收消息
-			logFileMutex.Lock()                                                   // 加锁以确保安全写入
-			logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg) // 写入日志
-			logFileMutex.Unlock()                                                 // 解锁
-			messagePool.Put(logMsg)                                               // 回收日志消息对象
+			currentLevel := logLevel.Load().(int)
+			if logMsg.level < currentLevel {
+				messagePool.Put(logMsg) // 低于当前日志等级，回收消息并跳过
+				continue
+			}
+
+			// 使用 slog 记录日志，根据 logMsg.level 映射到 slog 的等级
+			var level slog.Level
+			switch logMsg.level {
+			case LevelDump:
+				level = slog.LevelDebug - 4 // 保持 Dump 低于 Debug
+			case LevelDebug:
+				level = slog.LevelDebug
+			case LevelInfo:
+				level = slog.LevelInfo
+			case LevelWarn:
+				level = slog.LevelWarn
+			case LevelError:
+				level = slog.LevelError
+			default:
+				level = slog.LevelDebug // 默认使用 Debug 等级
+			}
+			logger.Log(context.Background(), level, logMsg.msg) // 使用 slog.Log 记录日志
+			messagePool.Put(logMsg)                             // 回收日志消息对象
+
 		case <-quitChannel: // 接收到关闭信号
 			for {
 				select {
 				case logMsg := <-logChannel: // 继续处理未处理的日志消息
-					logFileMutex.Lock()
-					logger.Printf("%s - %s\n", time.Now().Format(timeFormat), logMsg.msg)
-					logFileMutex.Unlock()
+					currentLevel := logLevel.Load().(int)
+					if logMsg.level < currentLevel {
+						messagePool.Put(logMsg) // 低于当前日志等级，回收消息并跳过
+						continue
+					}
+					var level slog.Level
+					switch logMsg.level {
+					case LevelDump:
+						level = slog.LevelDebug - 4 // 保持 Dump 低于 Debug
+					case LevelDebug:
+						level = slog.LevelDebug
+					case LevelInfo:
+						level = slog.LevelInfo
+					case LevelWarn:
+						level = slog.LevelWarn
+					case LevelError:
+						level = slog.LevelError
+					default:
+						level = slog.LevelDebug // 默认使用 Debug 等级
+					}
+					logger.Log(context.Background(), level, logMsg.msg) // 使用 slog.Log 记录日志
 					messagePool.Put(logMsg)
 				default:
 					return // 无更多消息，退出
@@ -156,10 +206,7 @@ func logWorker() {
 // 参数：level 日志等级；msg 日志内容
 // 该函数会检查当前日志等级，如果日志等级低于设定的等级，则不记录日志。
 func Log(level int, msg string) {
-	if level < logLevel.Load().(int) { // 检查日志等级
-		return // 如果等级低，直接返回
-	}
-
+	// 日志等级检查已经在 logWorker 中完成，这里只需要发送消息到通道
 	logMsg := messagePool.Get().(*logMessage) // 从池中获取日志消息对象
 	logMsg.level = level
 	logMsg.msg = msg
@@ -182,11 +229,21 @@ func Logf(level int, format string, args ...interface{}) {
 
 // 快捷日志方法
 // 这些方法用于不同日志等级的快捷记录，方便使用。
-func LogDump(format string, args ...interface{})    { Logf(LevelDump, "[DUMP] "+format, args...) }
-func LogDebug(format string, args ...interface{})   { Logf(LevelDebug, "[DEBUG] "+format, args...) }
-func LogInfo(format string, args ...interface{})    { Logf(LevelInfo, "[INFO] "+format, args...) }
-func LogWarning(format string, args ...interface{}) { Logf(LevelWarn, "[WARNING] "+format, args...) }
-func LogError(format string, args ...interface{})   { Logf(LevelError, "[ERROR] "+format, args...) }
+func LogDump(format string, args ...interface{}) {
+	Logf(LevelDump, "[DUMP] "+format, args...)
+}
+func LogDebug(format string, args ...interface{}) {
+	Logf(LevelDebug, "[DEBUG] "+format, args...)
+}
+func LogInfo(format string, args ...interface{}) {
+	Logf(LevelInfo, "[INFO] "+format, args...)
+}
+func LogWarning(format string, args ...interface{}) {
+	Logf(LevelWarn, "[WARNING] "+format, args...)
+}
+func LogError(format string, args ...interface{}) {
+	Logf(LevelError, "[ERROR] "+format, args...)
+}
 
 // Close 关闭日志系统
 // 该函数会关闭日志通道并等待日志处理协程完成。
@@ -219,7 +276,7 @@ func monitorLogSize(logFilePath string, maxBytes int64) {
 
 			if err == nil && info.Size() > maxBytes { // 检查文件大小
 				if err := rotateLogFile(logFilePath); err != nil { // 如果超出大小，进行轮转
-					LogError("Log rotation failed: %v", err)
+					LogError("Log rotation failed: %v", err) // 注意这里也要用 slog 的 Error
 				}
 			}
 		case <-quitChannel: // 接收到关闭信号
@@ -250,15 +307,28 @@ func rotateLogFile(logFilePath string) error {
 	if err != nil {
 		return fmt.Errorf("error creating new log file: %w", err)
 	}
-	logFile = newFile         // 更新当前日志文件句柄
-	logger.SetOutput(logFile) // 更新日志记录器的输出
+	logFile = newFile // 更新当前日志文件句柄
+	// logger.SetOutput(logFile) // slog 不需要 SetOutput，handler 在 Init 时已经绑定
+
+	// 需要更新 handler 的 writer，但是 slog.TextHandler 没有提供直接修改 writer 的方法
+	// 最简单的做法是重新创建一个新的 handler 和 logger
+	textHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{
+		Level: slog.LevelDebug, // 保持和 Init 中相同的默认等级
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	})
+	logger = slog.New(textHandler) // 创建新的 slog.Logger
 
 	go func() {
 		if err := compressLog(backupPath); err != nil { // 压缩备份文件
-			LogError("Compression failed: %v", err)
+			LogError("Compression failed: %v", err) // 注意这里也要用 slog 的 Error
 		}
 		if err := os.Remove(backupPath); err != nil { // 删除备份文件
-			LogError("Failed to remove backup file: %v", err)
+			LogError("Failed to remove backup file: %v", err) // 注意这里也要用 slog 的 Error
 			fmt.Printf("Failed to remove backup file: %v\n", err)
 		}
 	}()
@@ -311,3 +381,21 @@ func compressLog(srcPath string) error {
 
 	return nil // 返回 nil 表示成功
 }
+
+// 修改快捷日志方法以使用 slog
+func LogDumpf(format string, args ...interface{})  { Logf(LevelDump, "[DUMP] "+format, args...) }
+func LogDebugf(format string, args ...interface{}) { Logf(LevelDebug, "[DEBUG] "+format, args...) }
+func LogInfof(format string, args ...interface{})  { Logf(LevelInfo, "[INFO] "+format, args...) }
+func LogWarningf(format string, args ...interface{}) {
+	Logf(LevelWarn, "[WARNING] "+format, args...)
+}
+func LogErrorf(format string, args ...interface{}) { Logf(LevelError, "[ERROR] "+format, args...) }
+
+/*
+// 快捷方式调整，指向新的 Logf 方法
+var (
+	Logw = LogErrorf
+	logw = LogWarningf
+	logf = LogInfof
+)
+*/
