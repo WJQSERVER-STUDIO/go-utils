@@ -103,15 +103,40 @@ func Init(logFilePath string, maxLogSizeMB int) error {
 			return
 		}
 
-		// 创建 slog.Logger，使用 TextHandler 输出到文件
+		// 创建 slog.Logger，使用 TextHandler 输出到文件，并自定义格式
 		textHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{
 			Level: slog.LevelDebug, // 默认最低等级设置为 Debug，后续会根据 SetLogLevel 调整
-			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { // 可以自定义属性处理，例如移除时间戳
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.TimeKey {
-					return slog.Attr{} // 移除时间戳 (如果不需要)
+					// 格式化时间，例如 "2025-03-07T14:50:13+08:00" 这种格式 (RFC3339)
+					a.Value = slog.StringValue(a.Value.Time().Format(time.RFC3339))
+					return a
 				}
-				return a
+				if a.Key == slog.LevelKey {
+					levelString := ""
+					level := a.Value.Any().(slog.Level)
+					switch level {
+					case slog.LevelDebug - 4:
+						levelString = "[DUMP]"
+					case slog.LevelDebug:
+						levelString = "[DEBUG]"
+					case slog.LevelInfo:
+						levelString = "[INFO]"
+					case slog.LevelWarn:
+						levelString = "[WARN]"
+					case slog.LevelError:
+						levelString = "[ERROR]"
+					default:
+						levelString = "[UNKNOWN]" //  或者您可以选择忽略，如果默认级别就够用
+					}
+					return slog.String(a.Key, levelString) // 保留 "level" 键，但值替换为带括号的级别字符串
+				}
+				if a.Key == slog.MessageKey {
+					return slog.String(a.Key, a.Value.String()) // 保留 "msg" 键，值保持消息字符串
+				}
+				return a // 对于其他 attributes，保持原样
 			},
+			// Format: // 您也可以考虑完全自定义 Format 函数，如果 ReplaceAttr 不够灵活
 		})
 		logger = slog.New(textHandler) // 创建新的 slog.Logger
 
@@ -149,7 +174,7 @@ func logWorker() {
 				continue
 			}
 
-			// 使用 slog 记录日志，根据 logMsg.level 映射到 slog 的等级
+			// 使用 slog 记录日志，传递时间和级别作为 attributes
 			var level slog.Level
 			switch logMsg.level {
 			case LevelDump:
@@ -165,8 +190,17 @@ func logWorker() {
 			default:
 				level = slog.LevelDebug // 默认使用 Debug 等级
 			}
-			logger.Log(context.Background(), level, logMsg.msg) // 使用 slog.Log 记录日志
-			messagePool.Put(logMsg)                             // 回收日志消息对象
+
+			// 使用 slog.Log 记录日志，添加时间、级别和消息 attributes
+			logger.Log(
+				context.Background(),
+				level,
+				logMsg.msg,
+				// 可以选择移除时间属性，因为 TextHandler 默认会添加时间，我们已经在 ReplaceAttr 中格式化了
+				// slog.Time(time.Now()),
+				// slog.String("level", LevelName(level)), //  级别信息会被 TextHandler 自动处理，不需要手动添加，除非你想自定义级别名称
+			)
+			messagePool.Put(logMsg) // 回收日志消息对象
 
 		case <-quitChannel: // 接收到关闭信号
 			for {
