@@ -1,3 +1,3 @@
 module github.com/WJQSERVER-STUDIO/go-utils/logger
 
-go 1.23.5
+go 1.24.1
