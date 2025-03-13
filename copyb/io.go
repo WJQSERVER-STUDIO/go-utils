@@ -2,6 +2,7 @@ package copyb
 
 import (
 	"errors"
+	"io"
 
 	"github.com/valyala/bytebufferpool" // Import bytebufferpool
 )
@@ -89,8 +90,10 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 		defer bytebufferpool.Put(bufWrapper) // Return buffer to pool when done
 	}
 
+	var er error
+	var nr int
 	for {
-		nr, er := src.Read(buf)
+		nr, er = src.Read(buf)
 		if nr > 0 {
 			nw, ew := dst.Write(buf[0:nr])
 			if nw < 0 || nr < nw {
@@ -110,13 +113,25 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 			}
 		}
 		if er != nil {
-			if er != EOF {
+			if err == EOF || err == io.EOF { // 当遇到 EOF 时，正常退出循环，不返回错误
+				err = nil
+				break
+			} else {
 				err = er
+				break
 			}
-			break
 		}
 	}
-	return written, err
+	if err != nil {
+		if err == EOF || err == io.EOF { // 当遇到 EOF 时，正常退出循环，不返回错误
+			err = nil
+			return written, nil
+		} else {
+			return written, err
+		}
+	}
+
+	return written, nil
 }
 
 // errInvalidWrite means that a write returned an impossible count.
@@ -125,3 +140,7 @@ var errInvalidWrite = errors.New("invalid write result")
 // ErrShortWrite means that a write accepted fewer bytes than requested
 // but failed to return an explicit error.
 var ErrShortWrite = errors.New("short write")
+
+func Copy(dst Writer, src Reader) (written int64, err error) {
+	return CopyBuffer(dst, src, nil)
+}
