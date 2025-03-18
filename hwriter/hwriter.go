@@ -9,7 +9,7 @@ import (
 	"github.com/valyala/bytebufferpool"
 )
 
-func WriteChunkedBody(resp io.ReadCloser, c *app.RequestContext) error {
+func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 	defer resp.Close()
 
 	bw := hresp.NewChunkedBodyWriter(&c.Response, c.GetWriter())
