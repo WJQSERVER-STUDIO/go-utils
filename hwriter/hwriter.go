@@ -29,7 +29,10 @@ func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 		n, err := resp.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				c.Write(buf[:n])
+				_, err := c.Write(buf[:n])
+				if err != nil {
+					return fmt.Errorf("failed to write chunk: %w", err)
+				}
 				c.Flush() // Flush the last chunk
 				break     // 读取到文件末尾
 			}
