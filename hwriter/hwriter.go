@@ -30,7 +30,8 @@ func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 		n, err := resp.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				break // 读取到文件末尾
+				c.Flush() // Flush the last chunk
+				break     // 读取到文件末尾
 			}
 			return fmt.Errorf("failed to read response body: %w", err)
 		}
