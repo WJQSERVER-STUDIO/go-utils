@@ -13,8 +13,7 @@ import (
 func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 	defer resp.Close()
 
-	bw := hresp.NewChunkedBodyWriter(&c.Response, c.GetWriter())
-	c.Response.HijackWriter(bw)
+	c.Response.HijackWriter(hresp.NewChunkedBodyWriter(&c.Response, c.GetWriter()))
 
 	bufWrapper := bytebufferpool.Get()
 	buf := bufWrapper.B
@@ -30,6 +29,7 @@ func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 		n, err := resp.Read(buf)
 		if err != nil {
 			if err == io.EOF {
+				c.Write(buf[:n])
 				c.Flush() // Flush the last chunk
 				break     // 读取到文件末尾
 			}
@@ -37,14 +37,14 @@ func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 		}
 
 		if n > 0 { // Only write if we actually read something
-			_, err = bw.Write(buf[:n])
+			_, err = c.Write(buf[:n])
 			if err != nil {
 				// Handle write error (consider logging and potentially aborting)
 				return fmt.Errorf("failed to write chunk: %w", err)
 			}
 
 			//Consider removing Flush in most case.  Only keep it if you *really* need it.
-			if err := bw.Flush(); err != nil {
+			if err := c.Flush(); err != nil {
 				// More robust error handling for Flush()
 				c.AbortWithStatus(http.StatusInternalServerError) // Abort the response
 				return fmt.Errorf("failed to flush chunk: %w", err)
