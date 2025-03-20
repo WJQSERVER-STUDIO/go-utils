@@ -17,16 +17,21 @@ func Writer(resp io.ReadCloser, c *app.RequestContext) error {
 	c.Response.HijackWriter(bw)
 
 	bufWrapper := bytebufferpool.Get()
-	buf := bufWrapper.B[:32768] // Simplified buffer handling
+	buf := bufWrapper.B
+	size := 32768 // 32KB
+	buf = buf[:cap(buf)]
+	if len(buf) < size {
+		buf = append(buf, make([]byte, size-len(buf))...)
+	}
+	buf = buf[:size] // 将缓冲区限制为 'size'
 	defer bytebufferpool.Put(bufWrapper)
 
 	for {
 		n, err := resp.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				break // End of file, normal exit
+				break // 读取到文件末尾
 			}
-			// Handle read error (consider logging and potentially aborting)
 			return fmt.Errorf("failed to read response body: %w", err)
 		}
 
