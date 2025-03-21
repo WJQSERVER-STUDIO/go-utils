@@ -9,14 +9,14 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/WJQSERVER-STUDIO/go-utils/log"
+	//"github.com/WJQSERVER-STUDIO/go-utils/log"
 )
 
 // 常量定义
