@@ -185,6 +185,20 @@ func (l *Logger) CloseStruct() {
 
 // monitorLogSize 定期检查日志文件大小
 func (l *Logger) monitorLogSize(logFilePath string, maxBytes int64) {
+	// 预检测一次
+	go func() {
+		time.Sleep(30 * time.Second)
+		l.logFileMutex.Lock()
+		info, err := l.logFile.Stat() // 获取日志文件信息
+		l.logFileMutex.Unlock()
+
+		if err == nil && info.Size() > maxBytes {
+			if err := l.rotateLogFile(logFilePath); err != nil {
+				l.LogErrorStruct("Log rotation failed: %v", err) // 记录日志轮转失败的错误
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(15 * time.Minute) // 每 15 分钟检查一次
 	defer ticker.Stop()
 

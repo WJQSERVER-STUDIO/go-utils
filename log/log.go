@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,7 +182,8 @@ func formatHeader(buf *[]byte, t time.Time, prefix string, flag int, file string
 		}
 		*buf = append(*buf, file...)
 		*buf = append(*buf, ':')
-		*buf = strconv.AppendInt(*buf, int64(line), 10)
+		//*buf = strconv.AppendInt(*buf, int64(line), 10)
+		itoa(buf, line, -1)
 		*buf = append(*buf, ": "...)
 	}
 	if flag&Lmsgprefix != 0 {
