@@ -3,7 +3,7 @@ package logm
 import (
 	"time"
 
-	"github.com/WJQSERVER-STUDIO/go-utils/logger"
+	"github.com/WJQSERVER-STUDIO/logger"
 	"github.com/gin-gonic/gin"
 )
 
