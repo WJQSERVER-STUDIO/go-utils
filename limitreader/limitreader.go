@@ -173,6 +173,15 @@ var (
 const UnlimitedRateString = "-1"
 const UnDefiendRateString = "0"
 
+// 定义特殊error UnDefiendRateStringErr
+type UnDefiendRateStringErr struct {
+	s string
+}
+
+func (e *UnDefiendRateStringErr) Error() string {
+	return e.s
+}
+
 // ParseRate 解析人类可读的速度字符串 (例如, "100kbps", "1.5MB/s", "5000")。
 // 返回速率，单位是每秒字节数 (rate.Limit)。
 // 如果解析结果为非正数，则返回错误。对于表示无限制的情况，应在调用 ParseRate 后检查结果
@@ -185,9 +194,12 @@ func ParseRate(rateStr string) (rate.Limit, error) {
 		return rate.Inf, nil
 	}
 
-	// 处理未定义并日志抛出Waring
+	// 处理未定义
 	if rateStr == UnDefiendRateString {
-		return 0, fmt.Errorf("rate string cannot be 0, for unlimited should use -1")
+		//return 0, fmt.Errorf("rate string cannot be 0, for unlimited should use -1")
+		return rate.Inf, &UnDefiendRateStringErr{
+			s: "rate string cannot be 0, for unlimited should use -1",
+		}
 	}
 
 	if rateStr == "" {
