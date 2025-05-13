@@ -170,12 +170,26 @@ var (
 	}
 )
 
+const UnlimitedRateString = "-1"
+const UnDefiendRateString = "0"
+
 // ParseRate 解析人类可读的速度字符串 (例如, "100kbps", "1.5MB/s", "5000")。
 // 返回速率，单位是每秒字节数 (rate.Limit)。
 // 如果解析结果为非正数，则返回错误。对于表示无限制的情况，应在调用 ParseRate 后检查结果
 // 或使用 rate.Inf 直接传递给 NewRateLimitedReader 或 SetGlobalRateLimit。
 func ParseRate(rateStr string) (rate.Limit, error) {
 	rateStr = strings.TrimSpace(rateStr)
+
+	// 特殊处理无限速字符串
+	if rateStr == UnlimitedRateString {
+		return rate.Inf, nil
+	}
+
+	// 处理未定义并日志抛出Waring
+	if rateStr == UnDefiendRateString {
+		return 0, fmt.Errorf("rate string cannot be 0, for unlimited should use -1")
+	}
+
 	if rateStr == "" {
 		// 空字符串被视为无效输入，而不是无限速
 		return 0, fmt.Errorf("rate string cannot be empty")
