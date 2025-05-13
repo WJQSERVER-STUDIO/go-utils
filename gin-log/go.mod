@@ -3,11 +3,12 @@ module github.com/WJQSERVER-STUDIO/go-utils/gin-log
 go 1.24.3
 
 require (
-	github.com/WJQSERVER-STUDIO/go-utils/logger v1.6.0
+	github.com/WJQSERVER-STUDIO/logger v1.6.0
 	github.com/gin-gonic/gin v1.10.0
 )
 
 require (
+	github.com/WJQSERVER-STUDIO/go-utils/log v0.0.2 // indirect
 	github.com/bytedance/sonic v1.13.2 // indirect
 	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
