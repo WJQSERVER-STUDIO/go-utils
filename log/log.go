@@ -25,14 +25,14 @@ import (
 )
 
 const (
-	Ldate = 1 << iota
-	Ltime
-	Lmicroseconds
-	Llongfile
-	Lshortfile
-	LUTC
-	Lmsgprefix
-	LstdFlags = Ldate | Ltime
+	Ldate         = 1 << iota     // the date in the local time zone: 2009/01/23
+	Ltime                         // the time in the local time zone: 01:23:23
+	Lmicroseconds                 // microsecond resolution: 01:23:23.123123.  assumes Ltime.
+	Llongfile                     // full file name and line number: /a/b/c/d.go:23
+	Lshortfile                    // final file name element and line number: d.go:23. overrides Llongfile
+	LUTC                          // if Ldate or Ltime is set, use UTC rather than the local time zone
+	Lmsgprefix                    // move the "prefix" from the beginning of the line to before the message
+	LstdFlags     = Ldate | Ltime // initial values for the standard logger
 )
 
 type Logger struct {
@@ -48,7 +48,7 @@ type Logger struct {
 // 添加异步结构体
 type asyncWriter struct {
 	logger    *Logger
-	logChan   chan []byte
+	logChan   chan *[]byte // MODIFIED: Store pointers to byte slices
 	wg        sync.WaitGroup
 	closeChan chan struct{}
 }
@@ -57,7 +57,7 @@ type asyncWriter struct {
 func newAsyncWriter(l *Logger, bufferSize int) *asyncWriter {
 	aw := &asyncWriter{
 		logger:    l,
-		logChan:   make(chan []byte, bufferSize),
+		logChan:   make(chan *[]byte, bufferSize), // MODIFIED: Channel of pointers
 		closeChan: make(chan struct{}),
 	}
 	aw.wg.Add(1)
@@ -70,17 +70,28 @@ func (aw *asyncWriter) process() {
 	defer aw.wg.Done()
 	for {
 		select {
-		case entry := <-aw.logChan:
+		case entryBufPtr := <-aw.logChan: // entryBufPtr is *[]byte
 			aw.logger.outMu.Lock()
-			aw.logger.out.Write(entry)
+			aw.logger.out.Write(*entryBufPtr)
 			aw.logger.outMu.Unlock()
+			putBuffer(entryBufPtr) // MODIFIED: Return buffer to pool after writing
 		case <-aw.closeChan:
 			// 关闭前清空通道
-			for len(aw.logChan) > 0 {
-				entry := <-aw.logChan
-				aw.logger.out.Write(entry)
+			// Drain any remaining messages from the channel
+			// This loop ensures that we process messages that might have been added
+			// while we were processing the closeChan signal.
+			for {
+				select {
+				case entryBufPtr := <-aw.logChan:
+					aw.logger.outMu.Lock() // ADDED: Lock for consistency
+					aw.logger.out.Write(*entryBufPtr)
+					aw.logger.outMu.Unlock() // ADDED: Unlock
+					putBuffer(entryBufPtr)   // MODIFIED: Return buffer to pool
+				default:
+					// logChan is empty, we can return
+					return
+				}
 			}
-			return
 		}
 	}
 }
@@ -94,9 +105,15 @@ func (l *Logger) SetAsync(bufferSize int) {
 
 // 安全关闭异步写入器
 func (l *Logger) Close() error {
-	if l.asyncMode.CompareAndSwap(true, false) {
-		close(l.asyncWriter.closeChan)
-		l.asyncWriter.wg.Wait()
+	if l.asyncMode.Load() { // Check if it was ever in async mode
+		// Attempt to set asyncMode to false. If it was already false, do nothing.
+		// This helps prevent new async dispatches if Close is called multiple times
+		// or if it was never truly async.
+		swapped := l.asyncMode.CompareAndSwap(true, false)
+		if swapped { // Only close if we were the ones to turn off async mode
+			close(l.asyncWriter.closeChan)
+			l.asyncWriter.wg.Wait()
+		}
 	}
 	return nil
 }
@@ -182,7 +199,6 @@ func formatHeader(buf *[]byte, t time.Time, prefix string, flag int, file string
 		}
 		*buf = append(*buf, file...)
 		*buf = append(*buf, ':')
-		//*buf = strconv.AppendInt(*buf, int64(line), 10)
 		itoa(buf, line, -1)
 		*buf = append(*buf, ": "...)
 	}
@@ -200,8 +216,15 @@ func getBuffer() *[]byte {
 }
 
 func putBuffer(p *[]byte) {
-	if cap(*p) > 64<<10 {
-		*p = nil
+	if p == nil { // Robustness
+		return
+	}
+	// Shrink buffer if it's too large, to avoid holding onto large buffers indefinitely.
+	// For example, if cap(*p) > 256 && cap(*p) > 2 * len(*p) {
+	//    *p = make([]byte, len(*p)) // Create a new slice with just enough capacity.
+	// } else if cap(*p) > 64<<10 { // Original condition, might be too aggressive if large logs are common
+	if cap(*p) > 64<<10 { // Keep original logic for pool max capacity
+		*p = nil // Effectively discards it for GC, pool will create new one next time
 	}
 	bufferPool.Put(p)
 }
@@ -214,7 +237,7 @@ func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []b
 	var now time.Time
 	flag := l.Flags()
 	if flag&(Ldate|Ltime|Lmicroseconds) != 0 {
-		now = time.Now()
+		now = time.Now() // Lshortfile, Llongfile, LUTC uses later
 		if flag&LUTC != 0 {
 			now = now.UTC()
 		}
@@ -224,63 +247,64 @@ func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []b
 	var file string
 	var line int
 	if flag&(Lshortfile|Llongfile) != 0 {
+		// releaseLock purely for runtime.Callers,
+		// as it may malloc. It is safe to do after CAS,
+		// as the critical variables will not be changed.
+		// l.outMu.Unlock() // Original log has this, but we are not holding it yet.
+		var ok bool
 		if pc == 0 {
-			_, file, line, _ = runtime.Caller(calldepth)
+			_, file, line, ok = runtime.Caller(calldepth)
 		} else {
-			f, _ := runtime.CallersFrames([]uintptr{pc}).Next()
-			file = f.File
+			// This path is taken by Fatal and Panic via internal.DefaultOutput,
+			// which we are not using directly here, but good to keep consistent.
+			frames := runtime.CallersFrames([]uintptr{pc})
+			frame, _ := frames.Next()
+			file = frame.File
+			line = frame.Line
+			ok = file != ""
 		}
-		if file == "" {
+		if !ok {
 			file = "???"
+			line = 0
 		}
+		// l.outMu.Lock() // Re-acquire if unlocked above
 	}
 
 	buf := getBuffer()
-	defer putBuffer(buf)
+	// No `defer putBuffer(buf)` here anymore. It's conditional.
+
 	formatHeader(buf, now, prefix, flag, file, line)
 	*buf = appendOutput(*buf)
 	if len(*buf) == 0 || (*buf)[len(*buf)-1] != '\n' {
 		*buf = append(*buf, '\n')
 	}
 
-	if l.asyncMode.Load() {
+	var err error
+	if l.asyncMode.Load() && l.asyncWriter != nil { // Check asyncWriter != nil for safety during setup/teardown
+		// Send the pointer to the buffer to the async writer.
+		// The async writer is now responsible for calling putBuffer.
 		select {
-		case l.asyncWriter.logChan <- *buf:
+		case l.asyncWriter.logChan <- buf:
+			// Buffer ownership transferred to asyncWriter. It will call putBuffer.
+			// Do not call putBuffer(buf) here.
+			return nil
 		default:
-			// 通道满时降级为同步写入
+			// Channel full or async writer not ready, fallback to synchronous write.
+			// We (this goroutine) still own buf, so we must putBuffer it.
+			defer putBuffer(buf) // Ensure buffer is returned on this path
 			l.outMu.Lock()
-			defer l.outMu.Unlock()
-			_, err := l.out.Write(*buf)
-			if err != nil {
-				return err
-			}
+			_, err = l.out.Write(*buf)
+			l.outMu.Unlock()
 		}
-		return nil
 	} else {
-		// 原有同步写入逻辑
+		// Synchronous mode or async not fully initialized. We own buf.
+		defer putBuffer(buf) // Ensure buffer is returned on this path
 		l.outMu.Lock()
-		defer l.outMu.Unlock()
-		_, err := l.out.Write(*buf)
-		return err
-	}
-
-	/*
-		l.outMu.Lock()
-		_, err := l.out.Write(*buf)
+		_, err = l.out.Write(*buf)
 		l.outMu.Unlock()
-		return err
-	*/
-}
-
-/*
-func init() {
-	internal.DefaultOutput = func(pc uintptr, data []byte) error {
-		return std.output(pc, 0, func(buf []byte) []byte {
-			return append(buf, data...)
-		})
 	}
+	return err
 }
-*/
 
 // Cheap integer to fixed-width decimal ASCII. Give a negative width to avoid zero-padding.
 func itoa(buf *[]byte, i int, wid int) {
@@ -299,105 +323,88 @@ func itoa(buf *[]byte, i int, wid int) {
 	*buf = append(*buf, b[bp:]...)
 }
 
-// Output writes the output for a logging event. The string s contains
-// the text to print after the prefix specified by the flags of the
-// Logger. A newline is appended if the last character of s is not
-// already a newline. Calldepth is used to recover the PC and is
-// provided for generality, although at the moment on all pre-defined
-// paths it will be 2.
 func (l *Logger) Output(calldepth int, s string) error {
 	calldepth++ // +1 for this frame.
+	// Frame depth: 0: Output, 1: (Print|Printf|Println|Fatal|...), 2: caller of (Print|...)
 	return l.output(0, calldepth, func(b []byte) []byte {
 		return append(b, s...)
 	})
 }
 
-/*
-func init() {
-	internal.DefaultOutput = func(pc uintptr, data []byte) error {
-		return std.output(pc, 0, func(buf []byte) []byte {
-			return append(buf, data...)
-		})
-	}
-}
-*/
-
-// Print calls l.Output to print to the logger.
-// Arguments are handled in the manner of [fmt.Print].
 func (l *Logger) Print(v ...any) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
 }
 
-// Printf calls l.Output to print to the logger.
-// Arguments are handled in the manner of [fmt.Printf].
 func (l *Logger) Printf(format string, v ...any) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
 }
 
-// Println calls l.Output to print to the logger.
-// Arguments are handled in the manner of [fmt.Println].
 func (l *Logger) Println(v ...any) {
 	l.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 }
 
-// Fatal is equivalent to l.Print() followed by a call to [os.Exit](1).
 func (l *Logger) Fatal(v ...any) {
-	l.Output(2, fmt.Sprint(v...))
+	s := fmt.Sprint(v...)
+	l.output(0, 2, func(b []byte) []byte { // Use output for consistent formatting and async handling
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Fatalf is equivalent to l.Printf() followed by a call to [os.Exit](1).
 func (l *Logger) Fatalf(format string, v ...any) {
-	l.Output(2, fmt.Sprintf(format, v...))
+	s := fmt.Sprintf(format, v...)
+	l.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Fatalln is equivalent to l.Println() followed by a call to [os.Exit](1).
 func (l *Logger) Fatalln(v ...any) {
-	l.Output(2, fmt.Sprintln(v...))
+	s := fmt.Sprintln(v...)
+	l.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Panic is equivalent to l.Print() followed by a call to panic().
 func (l *Logger) Panic(v ...any) {
 	s := fmt.Sprint(v...)
-	l.Output(2, s)
+	l.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Panicf is equivalent to l.Printf() followed by a call to panic().
 func (l *Logger) Panicf(format string, v ...any) {
 	s := fmt.Sprintf(format, v...)
-	l.Output(2, s)
+	l.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Panicln is equivalent to l.Println() followed by a call to panic().
 func (l *Logger) Panicln(v ...any) {
 	s := fmt.Sprintln(v...)
-	l.Output(2, s)
+	l.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Flags returns the output flags for the logger.
-// The flag bits are [Ldate], [Ltime], and so on.
 func (l *Logger) Flags() int {
 	return int(l.flag.Load())
 }
 
-// SetFlags sets the output flags for the logger.
-// The flag bits are [Ldate], [Ltime], and so on.
 func (l *Logger) SetFlags(flag int) {
 	l.flag.Store(int32(flag))
 }
 
-// Prefix returns the output prefix for the logger.
 func (l *Logger) Prefix() string {
 	if p := l.prefix.Load(); p != nil {
 		return *p
@@ -405,122 +412,106 @@ func (l *Logger) Prefix() string {
 	return ""
 }
 
-// SetPrefix sets the output prefix for the logger.
 func (l *Logger) SetPrefix(prefix string) {
 	l.prefix.Store(&prefix)
 }
 
-// Writer returns the output destination for the logger.
 func (l *Logger) Writer() io.Writer {
 	l.outMu.Lock()
 	defer l.outMu.Unlock()
 	return l.out
 }
 
-// SetOutput sets the output destination for the standard logger.
 func SetOutput(w io.Writer) {
 	std.SetOutput(w)
 }
 
-// Flags returns the output flags for the standard logger.
-// The flag bits are [Ldate], [Ltime], and so on.
 func Flags() int {
 	return std.Flags()
 }
 
-// SetFlags sets the output flags for the standard logger.
-// The flag bits are [Ldate], [Ltime], and so on.
 func SetFlags(flag int) {
 	std.SetFlags(flag)
 }
 
-// Prefix returns the output prefix for the standard logger.
 func Prefix() string {
 	return std.Prefix()
 }
 
-// SetPrefix sets the output prefix for the standard logger.
 func SetPrefix(prefix string) {
 	std.SetPrefix(prefix)
 }
 
-// Writer returns the output destination for the standard logger.
 func Writer() io.Writer {
 	return std.Writer()
 }
 
-// These functions write to the standard logger.
-
-// Print calls Output to print to the standard logger.
-// Arguments are handled in the manner of [fmt.Print].
 func Print(v ...any) {
 	std.output(0, 2, func(b []byte) []byte {
 		return fmt.Append(b, v...)
 	})
 }
 
-// Printf calls Output to print to the standard logger.
-// Arguments are handled in the manner of [fmt.Printf].
 func Printf(format string, v ...any) {
 	std.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendf(b, format, v...)
 	})
 }
 
-// Println calls Output to print to the standard logger.
-// Arguments are handled in the manner of [fmt.Println].
 func Println(v ...any) {
 	std.output(0, 2, func(b []byte) []byte {
 		return fmt.Appendln(b, v...)
 	})
 }
 
-// Fatal is equivalent to [Print] followed by a call to [os.Exit](1).
 func Fatal(v ...any) {
-	std.Output(2, fmt.Sprint(v...))
+	s := fmt.Sprint(v...)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Fatalf is equivalent to [Printf] followed by a call to [os.Exit](1).
 func Fatalf(format string, v ...any) {
-	std.Output(2, fmt.Sprintf(format, v...))
+	s := fmt.Sprintf(format, v...)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Fatalln is equivalent to [Println] followed by a call to [os.Exit](1).
 func Fatalln(v ...any) {
-	std.Output(2, fmt.Sprintln(v...))
+	s := fmt.Sprintln(v...)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	os.Exit(1)
 }
 
-// Panic is equivalent to [Print] followed by a call to panic().
 func Panic(v ...any) {
 	s := fmt.Sprint(v...)
-	std.Output(2, s)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Panicf is equivalent to [Printf] followed by a call to panic().
 func Panicf(format string, v ...any) {
 	s := fmt.Sprintf(format, v...)
-	std.Output(2, s)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Panicln is equivalent to [Println] followed by a call to panic().
 func Panicln(v ...any) {
 	s := fmt.Sprintln(v...)
-	std.Output(2, s)
+	std.output(0, 2, func(b []byte) []byte {
+		return append(b, s...)
+	})
 	panic(s)
 }
 
-// Output writes the output for a logging event. The string s contains
-// the text to print after the prefix specified by the flags of the
-// Logger. A newline is appended if the last character of s is not
-// already a newline. Calldepth is the count of the number of
-// frames to skip when computing the file name and line number
-// if [Llongfile] or [Lshortfile] is set; a value of 1 will print the details
-// for the caller of Output.
 func Output(calldepth int, s string) error {
 	return std.Output(calldepth+1, s) // +1 for this frame.
 }
