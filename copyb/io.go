@@ -99,6 +99,32 @@ func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
 	return copyBuffer(dst, src, nil)
 }
 
+// CopyN 从 src 拷贝 n 字节数据到 dst (或在遇到错误时提前停止).
+// 它返回拷贝的字节数和拷贝时遇到的第一个错误.
+// 仅当 err == nil 时, written == n 才会成立.
+//
+// 此实现利用了池化的 copyb.Copy 和标准的 io.LimitReader, 以实现高性能.
+func CopyN(dst io.Writer, src io.Reader, n int64) (written int64, err error) {
+	// 使用我们池化的 Copy 函数和标准的 LimitReader 来执行拷贝.
+	// LimitReader 会确保我们从 src 中最多只读取 n 个字节.
+	written, err = Copy(dst, io.LimitReader(src, n))
+
+	// 根据 io.CopyN 的约定处理返回值.
+	if written == n {
+		// 如果我们成功拷贝了 n 个字节, LimitReader 会遇到 EOF,
+		// 但我们的 Copy 函数会将其视作正常结束, 返回 err = nil.
+		// 这是成功的标志, 所以我们确保返回 nil 错误.
+		return n, nil
+	}
+	if written < n && err == nil {
+		// 如果拷贝的字节数少于 n, 并且没有发生其他错误,
+		// 这意味着源 (src) 的数据提前结束了.
+		// 在这种情况下, 必须返回 io.EOF 错误.
+		err = io.EOF
+	}
+	return
+}
+
 // ReadAll 从 Reader r 中读取所有数据直到 EOF, 并返回读取的数据.
 // 它使用 bytebufferpool 来获取一个大的临时缓冲区, 避免了标准库 io.ReadAll
 // 在读取过程中可能发生的多次内存分配和拷贝, 从而显著降低GC压力.
