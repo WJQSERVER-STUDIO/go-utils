@@ -32,6 +32,8 @@ func copyBuffer(dst io.Writer, src io.Reader, buf []byte) (written int64, err er
 
 		// 从池中获取一个 ByteBuffer 对象.
 		bb := bytebufferpool.Get()
+		defer bytebufferpool.Put(bb)
+
 		// 检查池中获取的缓冲区容量.
 		// 如果容量小于我们的理想大小, 则进行一次“投资性”分配,
 		// 将其内部的切片替换为一个更大的切片.
@@ -39,10 +41,8 @@ func copyBuffer(dst io.Writer, src io.Reader, buf []byte) (written int64, err er
 		if cap(bb.B) < defaultBufSize {
 			bb.B = make([]byte, defaultBufSize)
 		}
-		// 使用 ByteBuffer 内部的切片作为我们的拷贝缓冲区.
-		buf = bb.B
-		// 使用 defer 确保函数退出时将 ByteBuffer 归还到池中.
-		defer bytebufferpool.Put(bb)
+
+		buf = bb.B[:defaultBufSize]
 	}
 
 	// 核心拷贝循环, 逻辑与标准库 io.Copy 保持一致, 保证健壮性.
