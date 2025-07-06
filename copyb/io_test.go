@@ -115,6 +115,57 @@ func TestCopyError(t *testing.T) {
 	}
 }
 
+// TestCopyN 测试 CopyN 函数的行为, 包括成功和提前遇到EOF的场景.
+func TestCopyN(t *testing.T) {
+	// 子测试1: 成功拷贝 n 个字节
+	t.Run("SuccessCase", func(t *testing.T) {
+		sourceString := "0123456789" // 源数据 (10字节)
+		src := strings.NewReader(sourceString)
+		dst := new(bytes.Buffer)
+		n := int64(5) // 期望拷贝的字节数
+
+		written, err := CopyN(dst, src, n)
+
+		// 验证错误应为 nil
+		if err != nil {
+			t.Fatalf("expected no error, but got: %v", err)
+		}
+		// 验证写入的字节数
+		if written != n {
+			t.Errorf("expected written bytes to be %d, but got %d", n, written)
+		}
+		// 验证拷贝的内容
+		expectedContent := "01234"
+		if dst.String() != expectedContent {
+			t.Errorf("expected copied content to be %q, but got %q", expectedContent, dst.String())
+		}
+	})
+
+	// 子测试2: 源数据不足 n 个字节, 提前遇到 EOF
+	t.Run("EarlyEOFCase", func(t *testing.T) {
+		sourceString := "01234" // 源数据 (5字节)
+		src := strings.NewReader(sourceString)
+		dst := new(bytes.Buffer)
+		n := int64(10) // 期望拷贝10字节, 但源只有5字节
+
+		written, err := CopyN(dst, src, n)
+
+		// 验证错误必须是 io.EOF
+		if err != io.EOF {
+			t.Fatalf("expected io.EOF, but got: %v", err)
+		}
+		// 验证写入的字节数等于源的实际长度
+		expectedWritten := int64(len(sourceString))
+		if written != expectedWritten {
+			t.Errorf("expected written bytes to be %d, but got %d", expectedWritten, written)
+		}
+		// 验证拷贝的内容是整个源
+		if dst.String() != sourceString {
+			t.Errorf("expected copied content to be %q, but got %q", sourceString, dst.String())
+		}
+	})
+}
+
 // --- 基准测试 (Benchmarks) ---
 
 // a large buffer for benchmarking
