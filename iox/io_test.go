@@ -1,4 +1,4 @@
-package copyb
+package iox
 
 import (
 	"bytes"
