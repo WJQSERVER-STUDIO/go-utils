@@ -125,27 +125,11 @@ func CopyN(dst io.Writer, src io.Reader, n int64) (written int64, err error) {
 	return
 }
 
-// ReadAll 从 Reader r 中读取所有数据直到 EOF, 并返回读取的数据.
-// 它使用 bytebufferpool 来获取一个大的临时缓冲区, 避免了标准库 io.ReadAll
-// 在读取过程中可能发生的多次内存分配和拷贝, 从而显著降低GC压力.
+// ReadAll reads from r until EOF.
 //
-// 函数会返回一个全新的数据切片副本, 池化的缓冲区会被安全地回收.
+// Deprecated: use io.ReadAll instead.
+//
+//go:fix inline
 func ReadAll(r io.Reader) ([]byte, error) {
-	// 从池中获取一个 ByteBuffer.
-	bb := bytebufferpool.Get()
-	// 确保函数退出时将 ByteBuffer 归还到池中.
-	defer bytebufferpool.Put(bb)
-
-	// 使用 ByteBuffer 实现的 io.ReaderFrom, 高效地读取所有数据.
-	// ReadFrom 内部会自动处理缓冲区的扩容.
-	_, err := bb.ReadFrom(r)
-	if err != nil {
-		return nil, err
-	}
-
-	// 必须创建并返回数据的副本, 因为 bb 即将被回收并可能被覆盖.
-	// 这是保证数据安全的关键步骤.
-	b := make([]byte, len(bb.B))
-	copy(b, bb.B)
-	return b, nil
+	return io.ReadAll(r)
 }
